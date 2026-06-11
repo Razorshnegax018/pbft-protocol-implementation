@@ -201,11 +201,3 @@ async fn wait_for_quorum(vote_reciever: &mut mpsc::Receiver<Bytes>,
         } if *quorum_counter >= 3 { break; }
     }
 }
-
-pub async fn _main() {
-    tokio::task::spawn(async move { start_server().await; });
-
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // start_client().await;
-}
