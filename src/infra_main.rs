@@ -283,7 +283,10 @@ async fn consensus_engine(
     let mut quorum_counter = 0; sleep.as_mut().reset(deadline.into());
 
     // leader verifying the transaction themselves
+
+    // TODO: REPLACE WITH ACTUAL CRYPTOGRAPHIC VERIFICAITON
     verify_transaction(&transaction, &mut quorum_counter, seq_counter, view_number);
+    // TODO: REPLACE WITH ACTUAL CRYPTOGRAPHIC VERIFICATION 
 
     tokio::select! {
         _ = wait_for_quorum(vote_reciever, &mut quorum_counter, b"PREPARE") => { println!("Quorum has been reached"); }
@@ -333,6 +336,7 @@ async fn consensus_engine(
 
 }
 
+// PLACEHOLDER VERIFY TO BE REMOVED WHEN I DIDN'T KNOW ABOUT DALEK
 fn verify_transaction(transaction: &Transaction, quorum_counter: &mut i32, seq_counter: u32, view_number: u32) {
     let mut hasher = Sha256::new();
     let mut hasher_buffer = BytesMut::new();
@@ -349,7 +353,7 @@ fn verify_transaction(transaction: &Transaction, quorum_counter: &mut i32, seq_c
 
     // if the hashes match, add primary client's vote to the counter
     if tx_hash == transaction.tx_hash && counter_valid == true { *quorum_counter += 1; }
-}
+} // PLACEHOLDER VERIFY TO BE REMOVED
 
 async fn wait_for_quorum(vote_reciever: &mut mpsc::Receiver<ActorRequest>, 
         quorum_counter: &mut i32, stage: &'static [u8]) {
