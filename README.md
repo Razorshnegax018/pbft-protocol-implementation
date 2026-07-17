@@ -25,7 +25,7 @@ In the blockchain protocol space,
 This is unfortunately retroactive documentation that I started after the project
 
 - June 9:
-	- Right now I'm refactoring the p2p networking layer so that instead of looping through the bootnode static list, the moment it connects to a peer it asks...? (trailed off here) 
+	- Right now I'm refactoring the p2p networking layer so that instead of looping through the bootnode static list, the moment it connects to a peer it asks . 
 
 	- in bootnode theory it seems like the network doesn't work unless you trust at least a bootstrap node. So the peer is going to trust that the addresses sent by the bootnodes are valid
 
@@ -152,3 +152,69 @@ This is unfortunately retroactive documentation that I started after the project
 - June 27th:
 	11:54 AM: Like I said, working on the whole system. Finally breaking ground on the bootnode logic
 		- Earlier I discussed registration mechanics and how the bootnode stays in sync with the rest of the network on the registry. The plan is, whenever the consensus actor gets a registration request, it then takes the updated list (I needed to change the registry to store not just the sockets but the addresses as well) and sends it to a long lived connection to the bootnode, which will then simply replace its registry with the value from the network.
+
+- June 29th
+	- 8:22 PM: Still working on the bootnode logic, we run into a similar issue as the consensus hot loop. The plauge of deciding how to handle shared state. The scene is that we only have two tasks in the bootnode file - the task that recieves new nodes from the leader node to update bootnode internal registry, and the task that sends new nodes registry and full transaction history
+	
+	- Each of those tasks need exclusive write access to the registry specifically, because one of them specifically might completely relocate the buffer. So that means I'm thinking of single threaded runtime as well
+
+	- That brings up the same issue as before - we'd need the task to wait before it gets scheduled. Similar to consensus actor since we're doing repeated network requests there'd be multiple await points, meaning tokio might schedule task b, which means we'd need a true await system...
+
+	- Of course that brings back the idea of single semaphore, which I trashed due to waker thrashing overhead (waker registration schematics), but wouldn't be the wrong tool here because node registration isn't a hot loop.
+
+	- Both of the following methods - tokio mutex and single semaphore - are incredibly similar in performance on single thread, because tokio mutex is implemented as a single semaphore under the hood, but Rc + tokio mutex was chosen because runtime Refcell tracking may add slight overhead
+
+	- "Well if new nodes need to connect to the bootnode first why don't you have the bootnode handle registration?" Well I didn't think of that 3 weeks ago. And I'm tired of stripping logic out of the infra_main file. 
+
+	- I'm also super tired of writing the words "registry" and "socket" and "registration", and "buffer"
+
+- July 1st
+	- 2:15 AM: Finishing up p2p layer work. Logic is, leader node sends bootnode list of addresses in a tightly packed payload. Debated fastest ways to split up the payload along address lines - Framed.next? BytesMut.chunks_exact? 
+
+	- Key is copying. We get the payload from the network inside a Framed.next, so it gets dropped at the end of the while loop iteration. Until the address list is empty, we copy into the master address list in 14 byte chunks - addr_list.split_to, and then the master list extends from slice of that split_to.
+
+	- Then, we're allowed to create a staging bytesmut for us to create connection packets and bincode to serialize those packets into, and then send the entire tightly packed list, this time as a list of connection packets.
+
+	- ...This is stupid. Universal language is the key. Instead of having mismatched formats we use Connection packet on infra main as well
+
+- July 3rd
+	- (Retroactive documentation)
+
+- July 5th
+	- 9:38 AM: I have addressed the fact that this is not the most effecient p2p networking strategy that *I* can create, and that I saw visible improvements (you might see some as well but if I don't then they aren't happening). However, I'm looking at code structure now, seeing the "unused variable" warning squiggles unde the connection address variable, and thinking "this is stupid". I think a about improvement, and perhaps it isn't as far away as I thought.
+
+		- I'm thinking a single task bootnode. A new peer connects to the bootnode and the bootnode handles registration in that same function. No need for multiple tasks, and no need for bootnode to communicate with the leader node at all (under a static leader system, which this implementation will be)
+
+		- Which in the bootnode code is rearranging some things and the leader node code is *removing* some lines. Simple fix, simple win.
+
+	- 9:51 AM: More thought and actually? We're not doing that. Let's think about some basic blockchain architecture. Ownership of the registry being with the bootnode means a heartbeat system and furious communication with the leader to keep its registry fresh, when...the leader can just handle it itself.
+
+- July 7th
+	- 9:05 AM: going back to work on peer node logic after a week of bootnode "work" (that word is used loosely here). Need to review cryptograpic signing and commit certificate/prepare vote certification (verifying each peer is who they say they are in the leader node logic as well)
+
+- July 8th
+	- 12:47 PM: Here's the issue at hand. For receiving votes, the consensus actor gets those votes as an anonyomus packet of bytes. Adding headers to those bytes during heavy vote broadcasting is a waste of bandwidth. So we store pubkeys locally. 
+
+		- Simple solution, right? Issue is, the packet is *just* the signed vote. that's it. There's no way for us to know who's who with just the packet we get from the reader actor
+
+		- That means in order to know who's who, we'd need to move verification to the reader runtime and only have it send verified votes through the channel.
+
+- July 10th
+	- 11:54 PM: On the peer node logic, Mutex or Channels/lock free queues. That's the question of the month. Let's map out the path of a transaction in order to get a better read on what the actual situation is:
+
+		- Client sends a transaction request to the peer node. Peer node verifies the transaction hash with the client's pubkey (and on actual chains checks balances and permissions). Once the transaction is deemed 'valid', what the peer...
+
+		- Nah... I have a bit of a bias against channels but they're clearly the correct choice here. I accept client transactions, verify, drop the transaction into the consensus engine channel, and then move onto the next client
+
+- July 11th
+	- 1:19 AM: I don't get any value by retyping everything here. So this is what I arrived to summarized: 
+		- Option 2 confirmed: consensus engine does its own crypto verification, not the accepting workers.
+
+		- Workers race to accept client transactions, verify signatures themselves, drop into the engine's channel, keep accepting.
+
+		- Skipped verify_batch. All-or-nothing failure means no way to ID which peer sent a bad signature — dealbreaker in a Byzantine system. Also pointless: network round trips dominate, not verification cost.
+
+- ??? (Some work done some day) (I couldn't be bothered to continue retroactive documentation)
+
+- July 17th 
+	- 1:16 AM: Mostly util work on the infra peer done today. Made utils to automate the making of codecs and frameds. Poor sleep schedule - I mean like staying up all night and then not really sleeping during the day, going to bed around 1 or 2 am is actually an achievement for me - is finally really catching up to be and so locking in on actually important logic has been impossible 
