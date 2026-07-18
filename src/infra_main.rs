@@ -4,7 +4,7 @@ use tokio::{sync::{mpsc}, time::Instant};
 
 use sha2::{Sha256, Digest};
 
-use tokio::{io::{self, Error, ErrorKind}, net::{TcpListener, TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}};
+use tokio::{io::{self}, net::{TcpListener, TcpStream, tcp::{OwnedReadHalf, OwnedWriteHalf}}};
 use tokio_util::{codec::{Framed, LengthDelimitedCodec}};
 
 use futures::{SinkExt, StreamExt};
@@ -15,7 +15,7 @@ use serde::{Serialize, Deserialize};
 
 use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 
-use crate::protocol::infra_peer::ConnectionPacket;
+use crate::protocol::infra_peer::{ConnectionPacket, deserialize_packet, make_framed};
 
 type SocketFramed = Framed<OwnedWriteHalf, LengthDelimitedCodec>;
 type ReadFramed = Framed<OwnedReadHalf, LengthDelimitedCodec>;
@@ -36,7 +36,7 @@ pub struct Transaction {
 /** Data that the client sends to a peer when requesting a mutation */
 #[derive(Serialize, Deserialize)]
 pub struct ClientTransaction {
-    pub key: Bytes, pub value: Bytes, pub client_key: Bytes
+    pub key: Bytes, pub value: Bytes, pub client_key: Bytes, pub signed_tx: Bytes
 }
 
 /** Struct that packages required tools for consensus 
@@ -67,7 +67,7 @@ pub struct RegistrationRequest { socket: OwnedWriteHalf, addr: std::net::SocketA
 /// @function starts the leader node server. function that handles requests from peer nodes
 /// the consensus actor and the netowrk state actor are both started in this fn as long running tasks
 /// * @param network_runtime - the tokio runtime handle for a reader task. can and is cloned per reader
-pub async fn start_server(network_runtime: tokio::runtime::Handle) -> Result<(), io::Error> {
+pub async fn start_server(network_runtime: tokio::runtime::Handle) -> io::Result<()> {
     let registry: PeerRegistry = Vec::with_capacity(10);
     let listener = TcpListener::bind(ADDRESS).await.unwrap();
     let tools = ConsensusToolsStruct { 
@@ -106,7 +106,7 @@ pub async fn start_server(network_runtime: tokio::runtime::Handle) -> Result<(),
 
     let reader_runtime = network_runtime.clone();
 
-    // Start the consensus actor task
+    // Start the consensus actor task (needed to wait when I tested it once)
     std::thread::sleep(Duration::from_secs(1));
     let _consensus_task = tokio::task::spawn_local(
         consensus_actor(commit_sender, tools, peer_receiver, registration_rx));
@@ -116,26 +116,24 @@ pub async fn start_server(network_runtime: tokio::runtime::Handle) -> Result<(),
         println!("Peer node {addr} connected to primary");
 
         let (read_socket, write_socket) = socket.into_split();
+
         // on connection, the very first thing the peer should do is send the leader its pubkey
-
-        let socket_codec = LengthDelimitedCodec::builder()
-            .length_field_length(2).little_endian().new_codec();
-
-        let mut read_framed = 
-            Framed::new(read_socket, socket_codec.clone());
+        let mut read_framed = make_framed(read_socket);
 
         if let Some(Ok(packet)) = read_framed.next().await {
-            let pubkey_packet = bincode::deserialize::<ConnectionPacket>(&packet)
-                .expect("Could not deserailize");
+            // error handling is inside the function. Skip this connection if the peer sends a bad packet
+            let Ok(pubkey_packet) = deserialize_packet::<ConnectionPacket>(&packet)
+                else { continue; };
             
-            if pubkey_packet.node_type != Bytes::from_static(b"pubkey") 
-                { /* refuse connection or smthn */ }
+            // if client sends a packet that isn't listed with 'client-pubkey', bad packet
+            if pubkey_packet.node_type != Bytes::from_static(b"client-pubkey") 
+                { continue; }
 
             // pass the read half and the request sender to a new reader task
             let _peer_tx = peer_tx.clone();
-            reader_runtime.spawn(reader_task(read_framed, _peer_tx, pubkey_packet.address)); 
+            reader_runtime.spawn(reader_task(read_framed, _peer_tx, pubkey_packet.payload)); 
 
-            // send a registration request to the hot loop receiver to register the write half
+            // send a registration request to the consensus enigne receiver to register the write half
             let request = RegistrationRequest 
                 { socket: write_socket, addr };
 
@@ -186,7 +184,10 @@ async fn consensus_actor(
         Some(request) = registration_rx.recv() => {
             // onboarding task request to add a new peer to the registry
             let socket_framed = Framed::new(request.socket, socket_codec.clone());
-                tools.registry.push(socket_framed);
+            tools.registry.push(socket_framed);
+
+            // add the address to the address list
+            tools.address_list.push(request.addr);
         
             // whenever there's a new peer, send the updated registry to the bootnode
             let addresses: Bytes = tools.address_list.into_iter().flat_map(|addr| 
@@ -283,10 +284,7 @@ async fn consensus_engine(
     let mut quorum_counter = 0; sleep.as_mut().reset(deadline.into());
 
     // leader verifying the transaction themselves
-
-    // TODO: REPLACE WITH ACTUAL CRYPTOGRAPHIC VERIFICAITON
     verify_transaction(&transaction, &mut quorum_counter, seq_counter, view_number);
-    // TODO: REPLACE WITH ACTUAL CRYPTOGRAPHIC VERIFICATION 
 
     tokio::select! {
         _ = wait_for_quorum(vote_reciever, &mut quorum_counter, b"PREPARE") => { println!("Quorum has been reached"); }
@@ -336,7 +334,6 @@ async fn consensus_engine(
 
 }
 
-// PLACEHOLDER VERIFY TO BE REMOVED WHEN I DIDN'T KNOW ABOUT DALEK
 fn verify_transaction(transaction: &Transaction, quorum_counter: &mut i32, seq_counter: u32, view_number: u32) {
     let mut hasher = Sha256::new();
     let mut hasher_buffer = BytesMut::new();
@@ -353,7 +350,7 @@ fn verify_transaction(transaction: &Transaction, quorum_counter: &mut i32, seq_c
 
     // if the hashes match, add primary client's vote to the counter
     if tx_hash == transaction.tx_hash && counter_valid == true { *quorum_counter += 1; }
-} // PLACEHOLDER VERIFY TO BE REMOVED
+}
 
 async fn wait_for_quorum(vote_reciever: &mut mpsc::Receiver<ActorRequest>, 
         quorum_counter: &mut i32, stage: &'static [u8]) {
