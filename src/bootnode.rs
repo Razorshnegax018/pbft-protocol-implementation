@@ -1,7 +1,6 @@
-use core::num;
-use std::{rc::Rc, sync::{Arc, RwLock, atomic::{AtomicBool, AtomicUsize, Ordering}}};
+use std::{rc::Rc, sync::{atomic::{AtomicBool, Ordering}}};
 
-use tokio::{io::{self, AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::Mutex};
+use tokio::{net::{TcpListener, TcpStream}, sync::Mutex};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -31,7 +30,7 @@ pub async fn start_bootnode() {
 	let update_codec = socket_codec.clone();
 
 	// Task 1 - listen for changes to registry from leader node
-	let mut update_listener_task = tokio::task::spawn_local(async move {
+	let update_listener_task = tokio::task::spawn_local(async move {
 		let leader_socket = TcpStream::connect(LEADER_ADDRESS).await
 			.expect("Failed to connect to leader socket");
 
@@ -54,7 +53,7 @@ pub async fn start_bootnode() {
 				// split off the address and create a packet from it
 				let packet = ConnectionPacket {
 					node_type: Bytes::from_static(b"client"),
-					address: addr_list.split_to(14).freeze() };
+					address: addr_list.split_to(14).freeze(), payload: Bytes::new() };
 
 				// serialize the packet
 				bincode::serialize_into((&mut serialize_pool).writer(), &packet).unwrap();
@@ -72,10 +71,10 @@ pub async fn start_bootnode() {
 	let join_task_list = address_list.clone();
 
 	// Task 2 - listen to connections from new tasks
-	let mut join_task = tokio::task::spawn_local(async move {
+	let join_task = tokio::task::spawn_local(async move {
 		let mut payload = BytesMut::with_capacity(1024);
 
-		while let Ok((socket, addr)) = listener.accept().await {
+		while let Ok((socket, _)) = listener.accept().await {
 			let list = &mut *join_task_list.lock().await;
 			let codec = task_codec.clone();
 
@@ -85,7 +84,7 @@ pub async fn start_bootnode() {
 			// construct the connection packet to send to the peer node
 			let leader_packet = ConnectionPacket { 
 				node_type: Bytes::from_static(b"leader"), 
-				address: Bytes::from_static(LEADER_ADDRESS.as_bytes()) };
+				address: Bytes::from_static(LEADER_ADDRESS.as_bytes()), payload: Bytes::new() };
 
 			// serialize and send leader connection packet
 			match bincode::serialize(&leader_packet) {
