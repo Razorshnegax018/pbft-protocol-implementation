@@ -3,11 +3,14 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 
 use rand::Rng;
+use serde::de::DeserializeOwned;
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::sync::mpsc;
 use tokio::{io, net::{TcpListener, TcpStream}};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use futures::{StreamExt, SinkExt};
+use futures::{AsyncRead, SinkExt, StreamExt};
 
 use bytes::{Bytes, BytesMut, BufMut};
 
@@ -27,20 +30,21 @@ static LEADER_ADDRESS: &str = "127.0.0.1:8070";
 
 #[derive(Serialize, Deserialize)]
 pub struct ConnectionPacket {
-    pub node_type: Bytes, pub address: Bytes
+    pub node_type: Bytes, pub address: Bytes, pub payload: Bytes
 }
 
 type SocketFramed = Framed<TcpStream, LengthDelimitedCodec>;
 
-fn make_framed(socket: TcpStream) -> SocketFramed {
+pub fn make_framed<Reader>(socket: Reader) -> Framed<Reader, LengthDelimitedCodec> 
+    where Reader: AsyncReadExt + Unpin {
     let socket_codec = LengthDelimitedCodec::builder()
         .length_field_length(2).little_endian().new_codec();
 
     Framed::new(socket, socket_codec)
 }
 
-fn deserialize_connection_packet(buffer: &[u8]) -> io::Result<ConnectionPacket> {
-    match bincode::deserialize::<ConnectionPacket>(buffer) {
+pub fn deserialize_packet<T: DeserializeOwned>(buffer: &[u8]) -> io::Result<T> {
+    match bincode::deserialize::<T>(buffer) {
         Ok(packet) => Ok(packet),
         Err(_) => {
             eprintln!("Bootnode sent bad packet");
@@ -59,7 +63,7 @@ async fn start_peer_node() {
         // if deserialization of the connection packet from the bootnode fails,
         // log the error and skip the packet
         while let Some(Ok(value)) = socket_framed.next().await {
-            let Ok(packet) = deserialize_connection_packet(&value) 
+            let Ok(packet) = deserialize_packet::<ConnectionPacket>(&value) 
                 else { continue; };
 
             // attempt connection to peer
@@ -106,8 +110,7 @@ async fn start_server(registry: PeerRegistry, leader_socket: LeaderSocket) {
             let _socket = TcpStream::connect(LEADER_ADDRESS).await
                 .expect("Could not connect to leader node");
 
-            let leader_socket 
-                = make_framed(_socket);
+            let leader_socket = make_framed(_socket);
 
             // TODO: spawn the consensus engine as a tokio task
 
@@ -133,15 +136,12 @@ async fn handle_request(socket: TcpStream, registry: PeerRegistry) -> io::Result
 
     // handle requests from clients to the protocol only at this stage
     while let Some(Ok(value)) = socket_framed.next().await {
-        match bincode::deserialize::<ClientTransaction>(&value[..]) {
-            Ok((transaction)) => {
-                // Step 0: send the client mutation request to the leader
 
-                // leader_framed.send().await;
-                // request_client_mutation(transaction, &mut leader_socket);
-            },
-            Err(_) => { eprintln!("Deserialization failed"); }
-        }
+        // deserialize client transaction
+        let Ok(client_tx) = deserialize_packet::<ClientTransaction>(&value) 
+            else { continue; };
+
+
     }
 
     Ok(())
